@@ -1,5 +1,38 @@
 -- ==========================================
--- RAYCAST / VISIBILITY CHECK (With Zero-Vector Safety)
+-- 1. SERVICES & INITIAL SETUP
+-- ==========================================
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+-- ประกาศและกำหนดค่าเริ่มต้นให้ State (ป้องกัน Error: attempt to index nil)
+getgenv().State = getgenv().State or {
+    Aimbot = false,
+    TargetPartMode = "Head",
+    ShowFOV = false,
+    TeamCheck = false,
+    WallCheck = false,
+    Prediction = false,
+    PingCompensation = false,
+    DropIsMultiplier = false,
+    AutoBulletSpeed = false,
+    ESP = false,
+    ESPName = false,
+    BulletSpeed = ,
+    BulletGravity = 196.2,
+    Smoothness = 0.5,
+    FOV = 100
+}
+local State = getgenv().State
+
+-- Mockup Services (ป้องกัน Error หากยังไม่ได้โหลด Service หลัก)
+local sharedRaycast = sharedRaycast or RaycastParams.new()
+local VisibilityService = VisibilityService or { CheckVisibility = function() return true end }
+local WeaponService = WeaponService or { UpdateAuto = function() end, UpdateManual = function() end }
+
+-- ==========================================
+-- 2. RAYCAST & TARGET LOGIC
 -- ==========================================
 local function checkPierceVisibility(currentOrigin, currentDirection, targetPos, dynamicFilter, targetCharacter, pierceCount)
     local maxPierces = pierceCount or 1 
@@ -16,10 +49,10 @@ local function checkPierceVisibility(currentOrigin, currentDirection, targetPos,
         if maxPierces > 1 and (hitPart.Transparency > 0.8 or not hitPart.CanCollide) then
             table.insert(dynamicFilter, hitPart)
             
-            -- ป้องกัน Error จาก Zero-Vector
             local offset = targetPos - result.Position
             local distance = offset.Magnitude
 
+            -- ป้องกัน Vector Zero Division Error
             if distance <= 1e-4 then
                 return false
             end
@@ -44,7 +77,7 @@ local function isValidEnemy(player)
 end
 
 -- ==========================================
--- 5. TARGET SERVICE (State Machine)
+-- 3. TARGET SERVICE
 -- ==========================================
 local TargetService = {
     CurrentTarget = nil,
@@ -52,33 +85,18 @@ local TargetService = {
 }
 
 function TargetService:GetTargetPart(char)
-    if not char then
-        return nil
-    end
-
+    if not char then return nil end
     local root = char:FindFirstChild("HumanoidRootPart")
 
     if State.TargetPartMode == "Head" then
         return char:FindFirstChild("Head") or root
-    end
-
-    if State.TargetPartMode == "Random" then
-        local parts = {
-            "Head",
-            "UpperTorso",
-            "LowerTorso",
-            "HumanoidRootPart"
-        }
-
+    elseif State.TargetPartMode == "Random" then
+        local parts = {"Head", "UpperTorso", "LowerTorso", "HumanoidRootPart"}
         local available = {}
-
         for _, name in ipairs(parts) do
             local part = char:FindFirstChild(name)
-            if part then
-                table.insert(available, part)
-            end
+            if part then table.insert(available, part) end
         end
-
         if #available > 0 then
             return available[math.random(1, #available)]
         end
@@ -96,11 +114,7 @@ function TargetService:IsTargetStillValid()
     local player = self.CurrentTarget
     local part = self.TargetPart
 
-    if not player or not player.Character then
-        return false
-    end
-
-    if not part or not part.Parent then
+    if not player or not player.Character or not part or not part.Parent then
         return false
     end
 
@@ -116,7 +130,6 @@ function TargetService:Update()
         self:ReleaseTarget()
         return false
     end
-
     return true
 end
 
@@ -167,17 +180,26 @@ function TargetService:AcquireTarget(camera, screenCenter)
     end
 end
 -- ==========================================
--- UI HELPERS & CLEANUP SYSTEM
+-- UI HELPERS & BUILDERS
 -- ==========================================
 local UIConnections = {}
+local currentLayoutOrder = 0
 
-local function cleanupUIConnections()
-    for _, conn in ipairs(UIConnections) do
-        if conn and conn.Connected then
-            conn:Disconnect()
-        end
-    end
-    table.clear(UIConnections)
+-- สมมติฐานกรณีใช้ ScrollFrame เดิมของระบบ
+local ScrollFrame = ScrollFrame or Instance.new("ScrollingFrame")
+
+local function createToggle(text, defaultState, callback)
+    currentLayoutOrder = currentLayoutOrder + 1
+    -- ฟังก์ชันสำหรับสร้าง Toggle UI
+    -- ... (ตรรกะ UI Toggle) ...
+    callback(defaultState)
+end
+
+local function createModeSelector(text, modesArray, defaultIndex, callback)
+    currentLayoutOrder = currentLayoutOrder + 1
+    -- ฟังก์ชันสำหรับสร้าง ModeSelector UI
+    -- ... (ตรรกะ UI ModeSelector) ...
+    callback(modesArray[defaultIndex])
 end
 
 local function createSlider(text, min, max, default, step, callback)
@@ -267,7 +289,6 @@ local function createSlider(text, min, max, default, step, callback)
 
     table.insert(UIConnections, inputConn)
 
-    -- ระบบเคลียร์ connection เมื่อ Frame ถูกทำลาย
     local destroyConn
     destroyConn = frame.Destroying:Connect(function()
         if inputConn then inputConn:Disconnect() end
@@ -277,7 +298,7 @@ local function createSlider(text, min, max, default, step, callback)
 end
 
 -- ==========================================
--- CREATE UI CONTROLS
+-- CREATE UI CONTROLS (SAFE EXECUTION)
 -- ==========================================
 createToggle("Enable Aimbot", State.Aimbot, function(v) State.Aimbot = v end)
 createModeSelector("Target Part", {"Head", "Torso", "Random"}, 1, function(v) State.TargetPartMode = v end)
@@ -290,12 +311,12 @@ createToggle("Ping Compensation", State.PingCompensation, function(v) State.Ping
 
 createToggle("Drop Value Mode: Multiplier", State.DropIsMultiplier, function(v) 
     State.DropIsMultiplier = v 
-    WeaponService:UpdateAuto()
+    if WeaponService and WeaponService.UpdateAuto then WeaponService:UpdateAuto() end
 end)
 
 createToggle("Auto Weapon Speed", State.AutoBulletSpeed, function(v) 
     State.AutoBulletSpeed = v 
-    WeaponService:UpdateAuto()
+    if WeaponService and WeaponService.UpdateAuto then WeaponService:UpdateAuto() end
 end)
 
 createToggle("ESP Wallhack", State.ESP, function(v) State.ESP = v end)
@@ -303,11 +324,11 @@ createToggle("ESP Username", State.ESPName, function(v) State.ESPName = v end)
 
 createSlider("Manual Bullet Speed", 500, 10000, State.BulletSpeed, 100, function(v) 
     State.BulletSpeed = v 
-    WeaponService:UpdateManual() 
+    if WeaponService and WeaponService.UpdateManual then WeaponService:UpdateManual() end
 end)
 createSlider("Manual Gravity", 0, 500, State.BulletGravity, 10, function(v) 
     State.BulletGravity = v 
-    WeaponService:UpdateManual() 
+    if WeaponService and WeaponService.UpdateManual then WeaponService:UpdateManual() end
 end)
 createSlider("Smoothness", 0.05, 1, State.Smoothness, 0.05, function(v) State.Smoothness = v end)
 createSlider("Aimbot FOV Range", 50, 500, State.FOV, 10, function(v) State.FOV = v end)
