@@ -1,0 +1,313 @@
+-- ==========================================
+-- RAYCAST / VISIBILITY CHECK (With Zero-Vector Safety)
+-- ==========================================
+local function checkPierceVisibility(currentOrigin, currentDirection, targetPos, dynamicFilter, targetCharacter, pierceCount)
+    local maxPierces = pierceCount or 1 
+
+    for i = 1, maxPierces do
+        sharedRaycast.FilterDescendantsInstances = dynamicFilter
+        local result = Workspace:Raycast(currentOrigin, currentDirection, sharedRaycast)
+        
+        if not result then return true end
+
+        local hitPart = result.Instance
+        if hitPart:IsDescendantOf(targetCharacter) then return true end
+
+        if maxPierces > 1 and (hitPart.Transparency > 0.8 or not hitPart.CanCollide) then
+            table.insert(dynamicFilter, hitPart)
+            
+            -- ป้องกัน Error จาก Zero-Vector
+            local offset = targetPos - result.Position
+            local distance = offset.Magnitude
+
+            if distance <= 1e-4 then
+                return false
+            end
+
+            currentDirection = offset
+            currentOrigin = result.Position + (offset.Unit * 0.05)
+        else
+            return false
+        end
+    end
+    return false
+end
+
+local function isValidEnemy(player)
+    if not player or player == LocalPlayer or not player.Character then return false end
+    local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+    local rootPart = player.Character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not rootPart or humanoid.Health <= 0 then return false end
+    if player.Character:FindFirstChildOfClass("ForceField") then return false end
+    if State.TeamCheck and player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then return false end
+    return true
+end
+
+-- ==========================================
+-- 5. TARGET SERVICE (State Machine)
+-- ==========================================
+local TargetService = {
+    CurrentTarget = nil,
+    TargetPart = nil
+}
+
+function TargetService:GetTargetPart(char)
+    if not char then
+        return nil
+    end
+
+    local root = char:FindFirstChild("HumanoidRootPart")
+
+    if State.TargetPartMode == "Head" then
+        return char:FindFirstChild("Head") or root
+    end
+
+    if State.TargetPartMode == "Random" then
+        local parts = {
+            "Head",
+            "UpperTorso",
+            "LowerTorso",
+            "HumanoidRootPart"
+        }
+
+        local available = {}
+
+        for _, name in ipairs(parts) do
+            local part = char:FindFirstChild(name)
+            if part then
+                table.insert(available, part)
+            end
+        end
+
+        if #available > 0 then
+            return available[math.random(1, #available)]
+        end
+    end
+
+    return root
+end
+
+function TargetService:ReleaseTarget()
+    self.CurrentTarget = nil
+    self.TargetPart = nil
+end
+
+function TargetService:IsTargetStillValid()
+    local player = self.CurrentTarget
+    local part = self.TargetPart
+
+    if not player or not player.Character then
+        return false
+    end
+
+    if not part or not part.Parent then
+        return false
+    end
+
+    if not part:IsDescendantOf(player.Character) then
+        return false
+    end
+
+    return isValidEnemy(player)
+end
+
+function TargetService:Update()
+    if not self:IsTargetStillValid() then
+        self:ReleaseTarget()
+        return false
+    end
+
+    return true
+end
+
+function TargetService:KeepTarget(camera, screenCenter)
+    if not self:IsTargetStillValid() then 
+        self:ReleaseTarget()
+        return false 
+    end
+
+    if State.WallCheck and not VisibilityService:CheckVisibility(self.CurrentTarget.Character, 1) then 
+        return false 
+    end
+
+    local screenPoint, onScreen = camera:WorldToViewportPoint(self.TargetPart.Position)
+    if not onScreen then return false end
+
+    local dist = (Vector2.new(screenPoint.X, screenPoint.Y) - screenCenter).Magnitude
+    if dist > (State.FOV * 1.2) then return false end
+
+    return true
+end
+
+function TargetService:AcquireTarget(camera, screenCenter)
+    local closestPlayer = nil
+    local shortestDist = State.FOV
+    local bestPart = nil
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if isValidEnemy(player) then
+            local tempPart = self:GetTargetPart(player.Character)
+            if tempPart and (not State.WallCheck or VisibilityService:CheckVisibility(player.Character, 1)) then
+                local screenPoint, onScreen = camera:WorldToViewportPoint(tempPart.Position)
+                if onScreen then
+                    local dist = (Vector2.new(screenPoint.X, screenPoint.Y) - screenCenter).Magnitude
+                    if dist < shortestDist then
+                        shortestDist = dist
+                        closestPlayer = player
+                        bestPart = tempPart
+                    end
+                end
+            end
+        end
+    end
+
+    if closestPlayer then
+        self.CurrentTarget = closestPlayer
+        self.TargetPart = bestPart
+    end
+end
+-- ==========================================
+-- UI HELPERS & CLEANUP SYSTEM
+-- ==========================================
+local UIConnections = {}
+
+local function cleanupUIConnections()
+    for _, conn in ipairs(UIConnections) do
+        if conn and conn.Connected then
+            conn:Disconnect()
+        end
+    end
+    table.clear(UIConnections)
+end
+
+local function createSlider(text, min, max, default, step, callback)
+    currentLayoutOrder = currentLayoutOrder + 1
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 48)
+    frame.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+    frame.LayoutOrder = currentLayoutOrder
+    frame.Parent = ScrollFrame
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = frame
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(0.6, 0, 0, 20)
+    label.Position = UDim2.new(0.04, 0, 0, 3)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = Color3.fromRGB(220, 220, 220)
+    label.Font = Enum.Font.SourceSans
+    label.TextSize = 11
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = frame
+
+    local valLabel = Instance.new("TextLabel")
+    valLabel.Size = UDim2.new(0.3, 0, 0, 20)
+    valLabel.Position = UDim2.new(0.65, 0, 0, 3)
+    valLabel.BackgroundTransparency = 1
+    valLabel.Text = tostring(default)
+    valLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
+    valLabel.Font = Enum.Font.SourceSansBold
+    valLabel.TextSize = 11
+    valLabel.TextXAlignment = Enum.TextXAlignment.Right
+    valLabel.Parent = frame
+
+    local sliderBar = Instance.new("TextButton")
+    sliderBar.Size = UDim2.new(0.92, 0, 0, 6)
+    sliderBar.Position = UDim2.new(0.04, 0, 0, 30)
+    sliderBar.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    sliderBar.Text = ""
+    sliderBar.AutoButtonColor = false
+    sliderBar.Parent = frame
+
+    local barCorner = Instance.new("UICorner")
+    barCorner.CornerRadius = UDim.new(0, 3)
+    barCorner.Parent = sliderBar
+
+    local sliderFill = Instance.new("Frame")
+    local initialRatio = math.clamp((default - min) / (max - min), 0, 1)
+    sliderFill.Size = UDim2.new(initialRatio, 0, 1, 0)
+    sliderFill.BackgroundColor3 = Color3.fromRGB(180, 0, 255)
+    sliderFill.BorderSizePixel = 0
+    sliderFill.Parent = sliderBar
+
+    local fillCorner = Instance.new("UICorner")
+    fillCorner.CornerRadius = UDim.new(0, 3)
+    fillCorner.Parent = sliderFill
+
+    local dragging = false
+    local inputConn = sliderBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            local function update(inp)
+                local ratio = math.clamp((inp.Position.X - sliderBar.AbsolutePosition.X) / sliderBar.AbsoluteSize.X, 0, 1)
+                local stepped = math.floor((min + (ratio * (max - min))) / step + 0.5) * step
+                sliderFill.Size = UDim2.new((stepped - min) / (max - min), 0, 1, 0)
+                valLabel.Text = tostring(stepped)
+                callback(stepped)
+            end
+            update(input)
+            local moveConn, relConn
+            moveConn = UserInputService.InputChanged:Connect(function(moveInp)
+                if dragging and (moveInp.UserInputType == Enum.UserInputType.MouseMovement or moveInp.UserInputType == Enum.UserInputType.Touch) then
+                    update(moveInp)
+                end
+            end)
+            relConn = UserInputService.InputEnded:Connect(function(relInp)
+                if relInp.UserInputType == Enum.UserInputType.MouseButton1 or relInp.UserInputType == Enum.UserInputType.Touch then
+                    dragging = false
+                    if moveConn then moveConn:Disconnect() end
+                    if relConn then relConn:Disconnect() end
+                end
+            end)
+        end
+    end)
+
+    table.insert(UIConnections, inputConn)
+
+    -- ระบบเคลียร์ connection เมื่อ Frame ถูกทำลาย
+    local destroyConn
+    destroyConn = frame.Destroying:Connect(function()
+        if inputConn then inputConn:Disconnect() end
+        if destroyConn then destroyConn:Disconnect() end
+    end)
+    table.insert(UIConnections, destroyConn)
+end
+
+-- ==========================================
+-- CREATE UI CONTROLS
+-- ==========================================
+createToggle("Enable Aimbot", State.Aimbot, function(v) State.Aimbot = v end)
+createModeSelector("Target Part", {"Head", "Torso", "Random"}, 1, function(v) State.TargetPartMode = v end)
+createToggle("Show FOV Circle", State.ShowFOV, function(v) State.ShowFOV = v end)
+createToggle("Team Check", State.TeamCheck, function(v) State.TeamCheck = v end)
+createToggle("Wall Check", State.WallCheck, function(v) State.WallCheck = v end)
+
+createToggle("Prediction Engine", State.Prediction, function(v) State.Prediction = v end)
+createToggle("Ping Compensation", State.PingCompensation, function(v) State.PingCompensation = v end)
+
+createToggle("Drop Value Mode: Multiplier", State.DropIsMultiplier, function(v) 
+    State.DropIsMultiplier = v 
+    WeaponService:UpdateAuto()
+end)
+
+createToggle("Auto Weapon Speed", State.AutoBulletSpeed, function(v) 
+    State.AutoBulletSpeed = v 
+    WeaponService:UpdateAuto()
+end)
+
+createToggle("ESP Wallhack", State.ESP, function(v) State.ESP = v end)
+createToggle("ESP Username", State.ESPName, function(v) State.ESPName = v end)
+
+createSlider("Manual Bullet Speed", 500, 10000, State.BulletSpeed, 100, function(v) 
+    State.BulletSpeed = v 
+    WeaponService:UpdateManual() 
+end)
+createSlider("Manual Gravity", 0, 500, State.BulletGravity, 10, function(v) 
+    State.BulletGravity = v 
+    WeaponService:UpdateManual() 
+end)
+createSlider("Smoothness", 0.05, 1, State.Smoothness, 0.05, function(v) State.Smoothness = v end)
+createSlider("Aimbot FOV Range", 50, 500, State.FOV, 10, function(v) State.FOV = v end)
