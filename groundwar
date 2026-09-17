@@ -273,13 +273,12 @@ function TargetService:AcquireTarget(camera, screenCenter)
 end
 
 -- ==========================================
--- 6. ADVANCED PREDICTION ENGINE (Secant Method)
+-- 6. ADVANCED PREDICTION ENGINE (Secant & Low-pass Filter)
 -- ==========================================
 local TargetStates = {}
 local MAX_SAMPLE_DT = 0.1
 local MAX_PREDICTION_TIME = 5.0
 
--- ล้าง Cache ขยะเมื่อ Part หายไปและผูกเข้ากับ State ของตัวโปรแกรมหลัก
 task.spawn(function()
     while getgenv().SnyX_Running and task.wait(10) do
         for part in pairs(TargetStates) do
@@ -291,13 +290,16 @@ task.spawn(function()
 end)
 CleanupManager:AddCustomCleanup(function() table.clear(TargetStates) end)
 
+-- คำนวณความเร่งแบบ Low-Pass Smoothing
 local function getTargetAcceleration(targetPart, targetVel, currentTime)
     local state = TargetStates[targetPart]
 
     if not state then  
         TargetStates[targetPart] = {  
             lastVelocity = targetVel,  
-            lastTime = currentTime  
+            lastTime = currentTime,
+            smoothedAcceleration = Vector3.zero,
+            lastPredictionTime = 0
         }  
         return Vector3.zero  
     end  
@@ -307,19 +309,24 @@ local function getTargetAcceleration(targetPart, targetVel, currentTime)
     local dt = currentTime - previousTime  
 
     if dt <= 0 then  
-        return Vector3.zero  
+        return state.smoothedAcceleration or Vector3.zero  
     end  
 
     if dt > MAX_SAMPLE_DT then  
         state.lastVelocity = targetVel  
         state.lastTime = currentTime  
+        state.smoothedAcceleration = Vector3.zero
         return Vector3.zero  
     end  
 
     state.lastVelocity = targetVel  
     state.lastTime = currentTime  
 
-    return (targetVel - previousVelocity) / dt
+    local rawAcceleration = (targetVel - previousVelocity) / dt
+    local smoothing = 0.15
+    state.smoothedAcceleration = (state.smoothedAcceleration or Vector3.zero):Lerp(rawAcceleration, smoothing)
+
+    return state.smoothedAcceleration
 end
 
 local function safeUnit(v3)
@@ -386,6 +393,15 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
         f1 = f(t1)  
     end  
 
+    -- จำกัดการเปลี่ยนแปลงของ Prediction Time อย่างต่อเนื่องไม่ให้กระโดด
+    local state = TargetStates[targetPart]
+    if state then
+        local prevPredictionTime = state.lastPredictionTime or t_intercept
+        local maxChangePerFrame = 0.02
+        t_intercept = prevPredictionTime + math.clamp(t_intercept - prevPredictionTime, -maxChangePerFrame, maxChangePerFrame)
+        state.lastPredictionTime = t_intercept
+    end
+
     local finalTargetPos = targetPos + (targetVel * t_intercept) + (0.5 * targetAcc * (t_intercept ^ 2))  
     local displacement = finalTargetPos - shooterPos  
       
@@ -409,22 +425,16 @@ local function getPredictedPosition(targetPart, rootPart)
 
     local shooterPos = camera.CFrame.Position
     local bulletSpeed = math.max(WeaponService.Speed, 1)
-    
-    -- กำหนดทิศทางแรงโน้มถ่วงกระสุนตกลงตามแกน Y
     local bulletGravityVec = Vector3.new(0, -WeaponService.Gravity, 0)
     
-    -- หา Direction การยิงชดเชยที่คำนวณจาก Secant Method
     local aimDirection = solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletGravityVec)
     
     if aimDirection then
-        -- แปลง Direction ที่ได้ให้เป็น World Position ที่กล้องต้องเล็งไป
-        -- ยืดระยะออกไป 10,000 Studs เพื่อให้ CFrame.lookAt ทำงานได้สมบูรณ์
         return shooterPos + (aimDirection * 10000)
     end
     
     return targetPos
 end
-
 -- ==========================================
 -- 7. ESP SERVICE (Lifecycle & Cache Managed)
 -- ==========================================
@@ -527,7 +537,7 @@ task.spawn(function()
 end)
 
 -- ==========================================
--- 8. MAIN CAMERA ENGINE
+-- 8. MAIN CAMERA ENGINE (Direction Vector Smoothing)
 -- ==========================================
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 1.5
@@ -564,10 +574,14 @@ CleanupManager:AddConn("RenderStep", RunService.RenderStepped:Connect(function(d
         local rootPart = TargetService.CurrentTarget.Character:FindFirstChild("HumanoidRootPart")
         if rootPart then
             local targetPos = getPredictedPosition(TargetService.TargetPart, rootPart)
-            local targetCFrame = CFrame.lookAt(camera.CFrame.Position, targetPos)
+            
+            -- ปรับตามโจทย์: ใช้ Direction Vector ที่ผ่าน smoothing ก่อน CFrame.lookAt()
+            local desiredDirection = (targetPos - camera.CFrame.Position).Unit
             local lerpSpeed = math.clamp(State.Smoothness * 35, 1, 60)
             local alpha = 1 - math.exp(-lerpSpeed * deltaTime)
-            camera.CFrame = camera.CFrame:Lerp(targetCFrame, alpha)
+
+            local smoothDirection = camera.CFrame.LookVector:Lerp(desiredDirection, alpha).Unit
+            camera.CFrame = CFrame.lookAt(camera.CFrame.Position, camera.CFrame.Position + smoothDirection)
         end
     end
 end))
