@@ -69,8 +69,8 @@ local State = {
     AutoBulletSpeed = true,
     BulletSpeed = 5000,
     BulletGravity = 0, 
-    Smoothness = 0.8,
-    FOV = 100,
+    Smoothness = 0.3,
+    FOV = 150,
     ShowFOV = false,
     ESP = true,
     ESPName = false
@@ -290,7 +290,6 @@ task.spawn(function()
 end)
 CleanupManager:AddCustomCleanup(function() table.clear(TargetStates) end)
 
--- คำนวณความเร่งแบบ Low-Pass Smoothing
 local function getTargetAcceleration(targetPart, targetVel, currentTime)
     local state = TargetStates[targetPart]
 
@@ -393,7 +392,6 @@ local function solveInterceptVector(shooterPos, targetPart, bulletSpeed, bulletG
         f1 = f(t1)  
     end  
 
-    -- จำกัดการเปลี่ยนแปลงของ Prediction Time อย่างต่อเนื่องไม่ให้กระโดด
     local state = TargetStates[targetPart]
     if state then
         local prevPredictionTime = state.lastPredictionTime or t_intercept
@@ -537,7 +535,7 @@ task.spawn(function()
 end)
 
 -- ==========================================
--- 8. MAIN CAMERA ENGINE (Direction Vector Smoothing)
+-- 8. MAIN CAMERA ENGINE (Weapon Gate & Direction Smoothing)
 -- ==========================================
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 1.5
@@ -545,6 +543,17 @@ FOVCircle.Color = Color3.fromRGB(255, 255, 255)
 FOVCircle.Filled = false
 FOVCircle.Transparency = 0.7
 CleanupManager:AddDrawing("FOVCircle", FOVCircle)
+
+-- ตรวจสอบว่ากำลังถืออาวุธ (Tool) อยู่หรือไม่
+local function hasActiveWeapon()
+    local character = LocalPlayer.Character
+    if not character then
+        return false
+    end
+
+    local tool = character:FindFirstChildOfClass("Tool")
+    return tool ~= nil
+end
 
 CleanupManager:AddConn("RenderStep", RunService.RenderStepped:Connect(function(deltaTime)
     local camera = getCamera()
@@ -555,7 +564,8 @@ CleanupManager:AddConn("RenderStep", RunService.RenderStepped:Connect(function(d
     FOVCircle.Radius = State.FOV
     FOVCircle.Visible = State.ShowFOV
 
-    if not State.Aimbot then
+    -- Weapon-Active Gate: ไม่ถือปืน หรือปิด Aimbot ให้ปล่อย Target และไม่ยุ่งกับ CFrame ของกล้อง
+    if not State.Aimbot or not hasActiveWeapon() then
         TargetService:ReleaseTarget()
         return
     end
@@ -575,7 +585,6 @@ CleanupManager:AddConn("RenderStep", RunService.RenderStepped:Connect(function(d
         if rootPart then
             local targetPos = getPredictedPosition(TargetService.TargetPart, rootPart)
             
-            -- ปรับตามโจทย์: ใช้ Direction Vector ที่ผ่าน smoothing ก่อน CFrame.lookAt()
             local desiredDirection = (targetPos - camera.CFrame.Position).Unit
             local lerpSpeed = math.clamp(State.Smoothness * 35, 1, 60)
             local alpha = 1 - math.exp(-lerpSpeed * deltaTime)
